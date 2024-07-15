@@ -35,6 +35,9 @@
 #include "runtime/timer.hpp"
 #include "utilities/align.hpp"
 
+//shengkai need syscall for user/sys time
+#include "runtime/os.hpp"
+
 #include <math.h>
 
 PSAdaptiveSizePolicy::PSAdaptiveSizePolicy(size_t init_eden_size,
@@ -75,7 +78,11 @@ PSAdaptiveSizePolicy::PSAdaptiveSizePolicy(size_t init_eden_size,
 
   // Start the timers
   _major_timer.start();
-
+  //shengkai: may not so accurate in first epoch
+  update_before_stage();
+  _prev_mut_rate = 0;
+  _prev_eden = 0;
+  log_info(gc, ergo)("[DEBUG] init pre time with policy initialization! User=%lfs, Sys=%lfs, Real=%lfs",_pre_user_time,_pre_sys_time,_pre_real_time);
   _old_gen_policy_is_ready = false;
 }
 
@@ -307,7 +314,39 @@ void PSAdaptiveSizePolicy::compute_eden_space_size(
   // a change less than the necessary alignment is probably not worth
   // attempting.
 
+  // shengkai: eden space step and prev adaptive information
+  double gc_rate = _gc_user_time / _mut_user_time;
+  double sys_rate = 0.0;
+  if(gc_rate < 1){
+    sys_rate = (_mut_sys_time+_gc_sys_time)/(_mut_user_time+_gc_user_time);
+  }else{
+    //ignore app interference when young gen is small enough
+    sys_rate = _gc_sys_time/_gc_user_time;
+  }
 
+  double mut_rate = _mut_user_time/(_mut_user_time+ _mut_sys_time+ _gc_user_time+ _gc_sys_time);
+  if(mut_rate < _prev_mut_rate){//allow small interferences
+    desired_eden_size = _prev_eden;
+    log_info(gc, ergo)("[DEBUG] back eden for %lf<0.9*%lf, new eden = %ld",mut_rate , _prev_mut_rate, desired_eden_size);
+  }else if(sys_rate > gc_rate/* super param */){
+    // majflat block more, assume no more than 10 times block
+    double decre = 0.05*(_mut_sys_time+_gc_sys_time)/_mut_user_time;
+    if(decre > 0.5 /* super param, max decre 50% at once*/)
+      decre = 0.5;
+    desired_eden_size = (size_t)((double)desired_eden_size * (1 - decre));
+    log_info(gc, ergo)("[DEBUG] decre eden for %lf, new eden = %ld", decre, desired_eden_size);
+  }else{
+    // gc cost more
+    double incre = 0.1*gc_rate;
+    if( incre > 1/*effect of double(multiply) is bad with both small eden and big eden*/)
+      incre = 1;
+    desired_eden_size += (size_t)((double)1024*1024*1024 * incre);// super param 1G
+    log_info(gc, ergo)("[DEBUG] incre eden for %lfg, new eden = %ld", incre, desired_eden_size);
+  }
+  _prev_eden = desired_eden_size;
+  _prev_mut_rate = mut_rate;
+  
+  /*
   if ((_avg_minor_pause->padded_average() > gc_pause_goal_sec()) ||
       (_avg_major_pause->padded_average() > gc_pause_goal_sec())) {
     //
@@ -348,6 +387,7 @@ void PSAdaptiveSizePolicy::compute_eden_space_size(
       desired_eden_size = adjust_eden_for_footprint(desired_eden_size, desired_sum);
     }
   }
+  */
 
   // Note we make the same tests as in the code block below;  the code
   // seems a little easier to read with the printing in another block.
@@ -1134,4 +1174,44 @@ bool PSAdaptiveSizePolicy::print() const {
   }
 
   return false;
+}
+
+// shengkai: update time record
+// update beginning
+void PSAdaptiveSizePolicy::update_before_stage(){
+  bool valid = os::getTimesSecs(&_pre_real_time,
+                                  &_pre_user_time,
+                                  &_pre_sys_time);
+  if (!valid) {
+    log_info(gc, ergo)("calculate gc fail: os::getTimesSecs() returned invalid result");
+  }
+}
+//shengkai: calculate mutator time this epoch
+void PSAdaptiveSizePolicy::calculate_mutator(){
+  double real_time, user_time, sys_time;
+  bool valid = os::getTimesSecs(&real_time, &user_time, &sys_time);
+  if(valid){
+    user_time -= _pre_user_time;
+    sys_time -= _pre_sys_time;
+    real_time -= _pre_real_time;
+    _mut_real_time = real_time;
+    _mut_sys_time = sys_time;
+    _mut_user_time = user_time;
+  }else
+    log_info(gc, ergo)("calculate gc fail: os::getTimesSecs() returned invalid result");
+}
+
+//shengkai: calculate gc time this epoch
+void PSAdaptiveSizePolicy::calculate_minor_gc(){
+  double real_time, user_time, sys_time;
+  bool valid = os::getTimesSecs(&real_time, &user_time, &sys_time);
+  if(valid){
+    user_time -= _pre_user_time;
+    sys_time -= _pre_sys_time;
+    real_time -= _pre_real_time;
+    _gc_real_time = real_time;
+    _gc_sys_time = sys_time;
+    _gc_user_time = user_time;
+  }else
+    log_info(gc, ergo)("calculate gc fail: os::getTimesSecs() returned invalid result");
 }
