@@ -149,6 +149,7 @@ class PSAdaptiveSizePolicy : public AdaptiveSizePolicy {
   
   size_t _prev_eden;      // step back
   double _prev_mut_rate;  // step back flag
+  bool   _is_backed;	  // flag of recover eden
 
  private:
 

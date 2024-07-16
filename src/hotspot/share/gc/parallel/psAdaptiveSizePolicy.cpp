@@ -82,6 +82,7 @@ PSAdaptiveSizePolicy::PSAdaptiveSizePolicy(size_t init_eden_size,
   update_before_stage();
   _prev_mut_rate = 0;
   _prev_eden = 0;
+  _is_backed = false;
   log_info(gc, ergo)("[DEBUG] init pre time with policy initialization! User=%lfs, Sys=%lfs, Real=%lfs",_pre_user_time,_pre_sys_time,_pre_real_time);
   _old_gen_policy_is_ready = false;
 }
@@ -325,11 +326,13 @@ void PSAdaptiveSizePolicy::compute_eden_space_size(
   }
 
   double mut_rate = _mut_user_time/(_mut_user_time+ _mut_sys_time+ _gc_user_time+ _gc_sys_time);
-  if(mut_rate < _prev_mut_rate){//allow small interferences
+  if((mut_rate < _prev_mut_rate) && (_is_backed == false)){//detect interferences of app pattern changes(should be short) , keep size until stable
+    _is_backed = true;
     desired_eden_size = _prev_eden;
-    log_info(gc, ergo)("[DEBUG] back eden for %lf<0.9*%lf, new eden = %ld",mut_rate , _prev_mut_rate, desired_eden_size);
+    log_info(gc, ergo)("[DEBUG] back eden for %lf < %lf, new eden = %ld",mut_rate , _prev_mut_rate, desired_eden_size);
   }else if(sys_rate > gc_rate/* super param */){
     // majflat block more, assume no more than 10 times block
+    _is_backed = false;
     double decre = 0.05*(_mut_sys_time+_gc_sys_time)/_mut_user_time;
     if(decre > 0.5 /* super param, max decre 50% at once*/)
       decre = 0.5;
@@ -337,15 +340,19 @@ void PSAdaptiveSizePolicy::compute_eden_space_size(
     log_info(gc, ergo)("[DEBUG] decre eden for %lf, new eden = %ld", decre, desired_eden_size);
   }else{
     // gc cost more
+    _is_backed = false;
     double incre = 0.1*gc_rate;
     if( incre > 1/*effect of double(multiply) is bad with both small eden and big eden*/)
       incre = 1;
     desired_eden_size += (size_t)((double)1024*1024*1024 * incre);// super param 1G
     log_info(gc, ergo)("[DEBUG] incre eden for %lfg, new eden = %ld", incre, desired_eden_size);
   }
-  _prev_eden = desired_eden_size;
-  _prev_mut_rate = mut_rate;
-  
+
+  if(_is_backed == false){
+    _prev_eden = cur_eden;
+    _prev_mut_rate = mut_rate;
+  }
+
   /*
   if ((_avg_minor_pause->padded_average() > gc_pause_goal_sec()) ||
       (_avg_major_pause->padded_average() > gc_pause_goal_sec())) {
